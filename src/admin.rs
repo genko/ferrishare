@@ -6,7 +6,7 @@ use argon2::{password_hash::PasswordVerifier, Argon2, PasswordHash};
 use axum::{
     extract::{Query, State},
     response::{Html, IntoResponse, Redirect},
-    Form,
+    Form, Json,
 };
 use axum_extra::extract::CookieJar;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -69,6 +69,22 @@ pub async fn admin_page(
         // Determine how much storage space all uploaded files currently use.
         let used_quota: u64 = all_files.iter().map(|e| e.filesize as u64).sum();
 
+        #[derive(FromRow)]
+        struct TokenRow {
+            id: i64,
+            token_sha256sum: String,
+            created_ts: String,
+            used_ts: Option<String>,
+            used_by_ip: Option<String>,
+        }
+
+        // Request info about all upload tokens
+        let all_tokens: Vec<TokenRow> = sqlx::query_as(
+            "SELECT id, token_sha256sum, created_ts, used_ts, used_by_ip FROM upload_tokens;",
+        )
+        .fetch_all(&aps.db)
+        .await?;
+
         #[derive(Debug, Serialize)]
         struct UploadedFile {
             efd_sha256sum: String,
@@ -123,9 +139,61 @@ pub async fn admin_page(
             })
             .collect::<Vec<_>>();
 
+        #[derive(Debug, Serialize)]
+        struct UploadToken {
+            id: i64,
+            token_sha256sum_short: String,
+            created_ts_pretty: String,
+            created_ts: String,
+            used: bool,
+            used_ts_pretty: String,
+            used_ts: String,
+            used_by_ip_pretty: String,
+        }
+
+        // Transform the token database rows into pretty strings
+        let tokens = all_tokens
+            .into_iter()
+            .map(|t| {
+                let cts = DateTime::parse_from_rfc3339(&t.created_ts).ok();
+                let uts = t.used_ts.as_ref().and_then(|ts| DateTime::parse_from_rfc3339(ts).ok());
+                UploadToken {
+                    id: t.id,
+                    token_sha256sum_short: t.token_sha256sum.chars().take(16).collect(),
+                    created_ts_pretty: if let Some(cts) = cts {
+                        format!("{} ago", pretty_print_delta(now, cts))
+                    } else {
+                        "N/A".to_string()
+                    },
+                    created_ts: if let Some(cts) = cts {
+                        cts.format("(%c)").to_string()
+                    } else {
+                        "(invalid timestamp)".to_string()
+                    },
+                    used: t.used_ts.is_some(),
+                    used_ts_pretty: if let Some(uts) = uts {
+                        format!("{} ago", pretty_print_delta(now, uts))
+                    } else {
+                        "N/A".to_string()
+                    },
+                    used_ts: if let Some(uts) = uts {
+                        uts.format("(%c)").to_string()
+                    } else {
+                        "".to_string()
+                    },
+                    used_by_ip_pretty: t.used_by_ip.as_ref().map_or("N/A".to_string(), |ip| {
+                        IpPrefix::from_str(ip)
+                            .map(|v| v.pretty_print())
+                            .unwrap_or_else(|_| "(invalid IP)".into())
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+
         // Add the global statistics to the rendering context.
         let mut context = aps.default_context();
         context.insert("files", &ufs);
+        context.insert("tokens", &tokens);
         context.insert("full_file_count", &ufs.len());
         context.insert("maximum_quota", &pretty_print_bytes(aps.conf.maximum_quota));
         context.insert("used_quota", &pretty_print_bytes(used_quota));
@@ -236,4 +304,101 @@ pub async fn admin_logout(
     );
 
     Ok((jar.remove("id"), Redirect::to("/admin")))
+}
+
+/// Endpoint allowing a site-wide administrator to create a new one-time upload token
+pub async fn create_upload_token(
+    State(aps): State<AppState>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, AppError> {
+    // Verify the admin is logged in
+    let user_session_sha256sum = URL_SAFE_NO_PAD.encode(Sha256::digest(
+        URL_SAFE_NO_PAD
+            .decode(jar.get("id").map_or("", |e| e.value()))
+            .unwrap_or_default(),
+    ));
+
+    let session_expiry: Option<String> = sqlx::query_scalar(
+        "SELECT expiry_ts FROM admin_sessions WHERE session_id_sha256sum = ? LIMIT 1;",
+    )
+    .bind(&user_session_sha256sum)
+    .fetch_optional(&aps.db)
+    .await?;
+
+    // Check if the session exists and has not yet expired.
+    if session_expiry.map_or(Ok(true), |v| has_expired(&v))? {
+        return AppError::err(StatusCode::UNAUTHORIZED, "not logged in");
+    }
+
+    // Generate a random token out of 256 bits of strong entropy
+    let token_bytes = rng().random::<[u8; 32]>();
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+
+    // Hash the token for storage in the database
+    let token_sha256sum = URL_SAFE_NO_PAD.encode(Sha256::digest(token_bytes));
+
+    // Get the current timestamp
+    let created_ts = Utc::now().to_rfc3339();
+
+    // Insert the token into the database
+    sqlx::query("INSERT INTO upload_tokens (token_sha256sum, created_ts) VALUES (?, ?);")
+        .bind(&token_sha256sum)
+        .bind(&created_ts)
+        .execute(&aps.db)
+        .await?;
+
+    tracing::info!(token_sha256sum, "created new upload token");
+
+    // Return the token in JSON format
+    Ok(Json(CreateTokenResponse { token }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateTokenResponse {
+    token: String,
+}
+
+/// Endpoint allowing a site-wide administrator to delete an upload token
+#[derive(Debug, Deserialize)]
+pub struct DeleteTokenRequest {
+    token_id: i64,
+}
+
+pub async fn delete_upload_token(
+    State(aps): State<AppState>,
+    jar: CookieJar,
+    Json(req): Json<DeleteTokenRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Verify the admin is logged in
+    let user_session_sha256sum = URL_SAFE_NO_PAD.encode(Sha256::digest(
+        URL_SAFE_NO_PAD
+            .decode(jar.get("id").map_or("", |e| e.value()))
+            .unwrap_or_default(),
+    ));
+
+    let session_expiry: Option<String> = sqlx::query_scalar(
+        "SELECT expiry_ts FROM admin_sessions WHERE session_id_sha256sum = ? LIMIT 1;",
+    )
+    .bind(&user_session_sha256sum)
+    .fetch_optional(&aps.db)
+    .await?;
+
+    // Check if the session exists and has not yet expired.
+    if session_expiry.map_or(Ok(true), |v| has_expired(&v))? {
+        return AppError::err(StatusCode::UNAUTHORIZED, "not logged in");
+    }
+
+    // Delete the token
+    let result = sqlx::query("DELETE FROM upload_tokens WHERE id = ?;")
+        .bind(req.token_id)
+        .execute(&aps.db)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return AppError::err(StatusCode::NOT_FOUND, "token not found");
+    }
+
+    tracing::info!(token_id = req.token_id, "deleted upload token");
+
+    Ok(StatusCode::OK)
 }

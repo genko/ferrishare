@@ -100,6 +100,7 @@ pub async fn upload_endpoint(
     let mut iv_fd: Option<[u8; 12]> = None;
     let mut iv_fn: Option<[u8; 12]> = None;
     let mut hour_duration: Option<i64> = None;
+    let mut upload_token: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await? {
         let field_name = field.name().map_or(String::new(), |e| e.to_string());
@@ -157,6 +158,12 @@ pub async fn upload_endpoint(
                     _ => None,
                 };
             }
+            "upload_token" => {
+                let s = std::str::from_utf8(&field_data).map_err(|_| {
+                    AppError::new(StatusCode::BAD_REQUEST, "invalid upload_token parameter")
+                })?;
+                upload_token = Some(s.to_string());
+            }
             _ => {
                 return AppError::err(StatusCode::BAD_REQUEST, "illegal form field during upload");
             }
@@ -171,6 +178,46 @@ pub async fn upload_endpoint(
     let iv_fn = iv_fn.ok_or_else(|| AppError::new(StatusCode::BAD_REQUEST, "no iv_fn provided"))?;
     let hour_duration = hour_duration
         .ok_or_else(|| AppError::new(StatusCode::BAD_REQUEST, "no duration provided"))?;
+    let upload_token = upload_token
+        .ok_or_else(|| AppError::new(StatusCode::BAD_REQUEST, "no upload_token provided"))?;
+
+    // Validate the upload token
+    let token_bytes = URL_SAFE_NO_PAD.decode(&upload_token).map_err(|_| {
+        AppError::new(StatusCode::BAD_REQUEST, "invalid upload_token format")
+    })?;
+    let token_sha256sum = URL_SAFE_NO_PAD.encode(Sha256::digest(token_bytes));
+
+    // Check if the token exists and has not been used yet
+    let token_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM upload_tokens WHERE token_sha256sum = ? AND used_ts IS NULL LIMIT 1;",
+    )
+    .bind(&token_sha256sum)
+    .fetch_optional(&aps.db)
+    .await?;
+
+    let token_id = token_id.ok_or_else(|| {
+        AppError::new(
+            StatusCode::FORBIDDEN,
+            "invalid or already used upload token",
+        )
+    })?;
+
+    // Mark the token as used
+    let now_ts = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE upload_tokens SET used_ts = ?, used_by_ip = ? WHERE id = ?;")
+        .bind(&now_ts)
+        .bind(&eip.to_string())
+        .bind(token_id)
+        .execute(&aps.db)
+        .await?;
+
+    tracing::info!(
+        token_id,
+        token_sha256sum,
+        upload_ip = eip.to_string(),
+        "upload token used"
+    );
+
     let filesize = e_filedata.len() as i64;
     let upload_ip = eip.to_string();
 

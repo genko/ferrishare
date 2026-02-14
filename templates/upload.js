@@ -17,6 +17,13 @@ async function uploadFile() {
     return;
   }
 
+  // Get the upload token
+  let uploadToken = document.getElementById("fs-token").value.trim();
+  if (!uploadToken) {
+    updateInfoBox("error", "Please enter an upload token");
+    return;
+  }
+
   // Disable the form from here on out.
   document.getElementById("fs-expiry-fieldset").disabled = true;
   document.getElementById("fs-filebutton").disabled = true;
@@ -89,6 +96,7 @@ async function uploadFile() {
   formData.append("iv_fd", new Blob([iv_filedata]));
   formData.append("iv_fn", new Blob([iv_filename]));
   formData.append("duration", duration);
+  formData.append("upload_token", uploadToken);
 
   // I'd love to use fetch for modern posting,
   // but if we want a regularly updating progress indicator we're stuck with XHR.

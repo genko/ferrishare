@@ -42,6 +42,13 @@
   </ul>
   <form id="filesubmit" class="hidden flex-col gap-8">
     <input class="hidden" type="file" id="fs-file">
+    <div class="flex flex-col gap-4">
+      <div class="flex flex-col gap-2">
+        <label for="fs-token" class="text-zinc-600">Upload Token</label>
+        <input type="text" id="fs-token" class="px-4 py-2 border-2 border-zinc-300 rounded font-mono text-sm" placeholder="Enter your upload token" required>
+        <p class="text-xs text-zinc-600">You need a valid upload token to upload files. Contact the administrator if you don't have one.</p>
+      </div>
+    </div>
     <div class="flex flex-col gap-2">
       <button type="button" id="fs-filebutton" class="btn-primary">
         <span class="matsym" aria-hidden="true">folder_open</span>

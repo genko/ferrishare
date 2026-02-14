@@ -410,6 +410,8 @@ async fn main() -> ExitCode {
         // API / non-HTML routes
         .route("/admin_login", post(admin::admin_login))
         .route("/admin_logout", post(admin::admin_logout))
+        .route("/create_upload_token", post(admin::create_upload_token))
+        .route("/delete_upload_token", post(admin::delete_upload_token))
         .route("/delete_endpoint", post(delete::delete_endpoint));
 
     // Add Privacy Policy / Legal Notice, if configured.
