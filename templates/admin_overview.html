@@ -78,6 +78,10 @@
         </button>
       </div>
     </div>
+    <button type="button" id="token-done-button" class="btn-primary">
+      <span>Done - Refresh Page</span>
+      <span class="matsym" aria-hidden="true">refresh</span>
+    </button>
   </div>
   {% if tokens %}
   <div class="flex flex-col gap-4">
@@ -260,8 +264,6 @@
         document.getElementById("token-value").value = response.token;
         document.getElementById("token-display").classList.remove("hidden");
         document.getElementById("token-display").classList.add("flex");
-        // Reload the page after a delay to show the new token in the list
-        setTimeout(() => window.location.reload(), 3000);
       } else {
         console.error("Failed to create token:", xhr.responseText);
         alert("Failed to create token. Please try again.");
@@ -284,6 +286,11 @@
     setTimeout(() => {
       btn.innerHTML = originalHTML;
     }, 1000);
+  });
+
+  // Token done button handler (reload page to show new token in list)
+  document.getElementById("token-done-button").addEventListener("click", () => {
+    window.location.reload();
   });
 
   // Token deletion handler

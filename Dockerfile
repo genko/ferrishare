@@ -18,15 +18,19 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Next up, download and build the dependencies.
 FROM chef AS builder
+# Install musl development tools for C dependencies
+RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
+# Add musl target for static linking
+RUN rustup target add x86_64-unknown-linux-musl
 # Copy over the recipe.
 COPY --from=planner /app/recipe.json recipe.json
 # Actually download and build the dependencies.
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
 # Next up, the part that is not cached: Building the app itself.
 COPY . .
 # We set the environment variable VCS_REF here, which is read by the Rust compiler
 # to insert the 10 character commit hash into the version string displayed in the app's footer.
-RUN VCS_REF="$(git rev-parse --short=10 HEAD)" cargo build --release
+RUN VCS_REF="$(git rev-parse --short=10 HEAD)" cargo build --release --target x86_64-unknown-linux-musl
 
 # The app uses Tailwind CSS for its styles. This requires a build step.
 FROM node:23-bookworm AS node-builder
@@ -43,25 +47,25 @@ COPY ./main.tw.css .
 COPY ./tailwind.config.js .
 # Generate the stylesheet.
 RUN npm run build:tw
-
-# With all builds done, we now move to set up the container for FerriShare itself.
-FROM debian:13-slim
-WORKDIR /app
-# Copy in the frontend templates.
-COPY ./templates/ ./templates/
-# Copy in the generated stylesheet
-COPY --from=node-builder /app/static/main.css ./static/main.css
 # Compute the hash of the generated main.css and add it to its filename.
 # This way the resource can benefit from permanent browser caching.
 RUN HASH_SUFFIX="$(sha256sum ./static/main.css | cut -d ' ' -f 1 | tail -c 9)" \
     && mv ./static/main.css ./static/main-${HASH_SUFFIX}.css \
     && sed -i -e "s/main.css/main-${HASH_SUFFIX}.css/g" ./templates/base.html
+
+# With all builds done, we now move to set up the container for FerriShare itself.
+FROM scratch
+WORKDIR /app
+# Copy in the frontend templates with the updated CSS reference.
+COPY --from=node-builder /app/templates/ ./templates/
+# Copy in the generated and hashed stylesheet
+COPY --from=node-builder /app/static/main-*.css ./static/
 # Copy in the subsetted fonts ready for production use.
 COPY ./font/MaterialSymbolsRounded-subset-*.woff2 ./font/
 COPY ./font/InterVariable-subset-*.woff2 ./font/
 # Copy in the favicon PNGs.
 COPY ./favicon/*.png ./favicon/
 # Copy in the compiled release binary.
-COPY --from=builder /app/target/release/ferrishare .
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/ferrishare .
 EXPOSE 3000
 ENTRYPOINT ["./ferrishare"]
